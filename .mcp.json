@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "talonone": {
+      "command": "npx",
+      "args": ["tsx", "src/index.ts"],
+      "env": {
+        "TALON_ENV_FILE": ".env"
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "talonone",
+  "description": "Conversationally create and manage Talon.One campaigns from Claude using the Management API.",
+  "author": {
+    "name": "Prashanth",
+    "email": ""
+  }
+}
