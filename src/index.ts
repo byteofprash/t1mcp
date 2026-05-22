@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -12,22 +13,33 @@ import { z } from "zod";
 interface Config {
   apiKey: string;
   baseUrl: string;
+  integrationApiKey?: string;
 }
 
 function loadConfig(): Config | null {
-  const envFile =
-    process.env.TALON_ENV_FILE ??
-    `${process.env.HOME}/.claude/channels/talonone/.env`;
-  try {
-    const raw = fs.readFileSync(envFile, "utf-8");
-    const parsed = dotenv.parse(raw);
-    const apiKey = (parsed.TALON_MANAGEMENT_API_KEY ?? parsed.TALON_API_KEY)?.trim();
-    const baseUrl = parsed.TALON_BASE_URL?.trim().replace(/\/$/, "");
-    if (apiKey && baseUrl) return { apiKey, baseUrl };
-    return null;
-  } catch {
-    return null;
+  // Primary: read directly from process.env (set via the MCP host's env block)
+  let apiKey = (process.env.TALON_MANAGEMENT_API_KEY ?? process.env.TALON_API_KEY)?.trim();
+  let baseUrl = process.env.TALON_BASE_URL?.trim().replace(/\/$/, "");
+  let integrationApiKey = process.env.TALON_INTEGRATION_API_KEY?.trim();
+
+  // Fallback: load from a .env file for local development
+  if (!apiKey || !baseUrl) {
+    const envFile =
+      process.env.TALON_ENV_FILE ??
+      `${process.env.HOME}/.claude/channels/talonone/.env`;
+    try {
+      const raw = fs.readFileSync(envFile, "utf-8");
+      const parsed = dotenv.parse(raw);
+      apiKey ??= (parsed.TALON_MANAGEMENT_API_KEY ?? parsed.TALON_API_KEY)?.trim();
+      baseUrl ??= parsed.TALON_BASE_URL?.trim().replace(/\/$/, "");
+      integrationApiKey ??= parsed.TALON_INTEGRATION_API_KEY?.trim();
+    } catch {
+      // no .env file present, that's fine
+    }
   }
+
+  if (apiKey && baseUrl) return { apiKey, baseUrl, integrationApiKey };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +76,53 @@ async function talonFetch(
     throw new McpError(
       code,
       `Talon.One API error ${res.status}: ${typeof json === "string" ? json : JSON.stringify(json)}`
+    );
+  }
+
+  return json;
+}
+
+// ---------------------------------------------------------------------------
+// Integration API HTTP client
+// ---------------------------------------------------------------------------
+
+async function integrationFetch(
+  config: Config,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<unknown> {
+  if (!config.integrationApiKey) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "Integration API key not configured. Run /talonone:configure to add your TALON_INTEGRATION_API_KEY."
+    );
+  }
+
+  const url = `${config.baseUrl}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `ApiKey-v1 ${config.integrationApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+
+  const text = await res.text();
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = text;
+  }
+
+  if (!res.ok) {
+    const code =
+      res.status >= 500 ? ErrorCode.InternalError : ErrorCode.InvalidRequest;
+    throw new McpError(
+      code,
+      `Talon.One Integration API error ${res.status}: ${typeof json === "string" ? json : JSON.stringify(json)}`
     );
   }
 
@@ -484,6 +543,386 @@ server.tool(
     ].join("\n");
 
     return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: list_attributes
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "list_attributes",
+  "List all custom attributes defined in this Talon.One account, optionally filtered by entity type. Use this to discover available attributes before constructing a session payload — only attributes returned here may be used.",
+  {
+    entity: z
+      .enum(["CustomerProfile", "CustomerSession", "CartItem", "Coupon", "Campaign", "Event"])
+      .optional()
+      .describe("Filter attributes by entity type. Omit to return all attributes."),
+  },
+  async ({ entity }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+        }],
+      };
+    }
+
+    const qs = entity ? `?entity=${encodeURIComponent(entity)}&pageSize=1000` : "?pageSize=1000";
+    const result = (await talonFetch(config, "GET", `/v1/attributes${qs}`)) as {
+      data: Array<{ id: number; entity: string; name: string; title: string; type: string; description?: string }>;
+    };
+
+    const attrs = result.data ?? [];
+    if (attrs.length === 0) {
+      return { content: [{ type: "text" as const, text: "No custom attributes found." }] };
+    }
+
+    const text = attrs
+      .map((a) => `[${a.entity}] ${a.name} (${a.type})${a.title ? ` — "${a.title}"` : ""}${a.description ? `: ${a.description}` : ""}`)
+      .join("\n");
+
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: list_customer_profiles
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "list_customer_profiles",
+  "List customer profiles in a Talon.One application. Use this during quiz mode to show the user which existing profiles they can test against.",
+  {
+    applicationId: z
+      .coerce.number()
+      .int()
+      .describe("The ID of the Talon.One application."),
+    pageSize: z
+      .coerce.number()
+      .int()
+      .optional()
+      .describe("Maximum number of profiles to return. Defaults to 20."),
+  },
+  async ({ applicationId, pageSize = 20 }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+        }],
+      };
+    }
+
+    const result = (await talonFetch(
+      config,
+      "GET",
+      `/v1/applications/${applicationId}/customers?pageSize=${pageSize}`
+    )) as {
+      data: Array<{ id: number; integrationId: string; created?: string; attributes?: Record<string, unknown> }>;
+      totalResultSize?: number;
+    };
+
+    const profiles = result.data ?? [];
+    if (profiles.length === 0) {
+      return { content: [{ type: "text" as const, text: "No customer profiles found for this application." }] };
+    }
+
+    const total = result.totalResultSize ?? profiles.length;
+    const lines = profiles.map((p) => {
+      const attrs = p.attributes && Object.keys(p.attributes).length > 0
+        ? ` | Attributes: ${Object.entries(p.attributes).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")}`
+        : "";
+      return `Integration ID: ${p.integrationId}${attrs}`;
+    });
+
+    const header = total > profiles.length
+      ? `Showing ${profiles.length} of ${total} profiles:\n`
+      : `${profiles.length} profile(s):\n`;
+
+    return { content: [{ type: "text" as const, text: header + lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: update_customer_session
+// ---------------------------------------------------------------------------
+
+const CartItemSchema = z.object({
+  name: z.string().describe("Product name."),
+  sku: z.string().describe("Product SKU or identifier."),
+  quantity: z.coerce.number().describe("Number of units."),
+  price: z.coerce.number().describe("Unit price (in the account's base currency)."),
+  category: z.string().optional().describe("Product category."),
+  weight: z.coerce.number().optional().describe("Item weight in grams."),
+  attributes: z.record(z.unknown()).optional().describe("Custom CartItem attributes."),
+});
+
+server.tool(
+  "update_customer_session",
+  "Create or update a customer session in Talon.One via the Integration API. This triggers campaign evaluation and returns the effects (discounts, loyalty points, coupons) along with which campaigns fired or failed. Use this as the core tool for basket/cart testing.",
+  {
+    sessionId: z
+      .string()
+      .describe("A unique identifier for this test session. Use any string — it will be created if it doesn't exist."),
+    profileId: z
+      .string()
+      .describe("The integration ID of an existing customer profile. Must already exist — never pass a new profile ID."),
+    state: z
+      .enum(["open", "closed", "cancelled"])
+      .describe("Session state: 'open' = active/shopping, 'closed' = checkout complete, 'cancelled' = abandoned."),
+    cartItems: z
+      .array(CartItemSchema)
+      .optional()
+      .describe("Items in the cart/basket."),
+    couponCodes: z
+      .array(z.string())
+      .optional()
+      .describe("Coupon codes to apply to this session."),
+    referralCode: z
+      .string()
+      .optional()
+      .describe("Referral code to apply."),
+    channel: z
+      .string()
+      .optional()
+      .describe("Sales channel (e.g. 'retail_web', 'mobile_app'). Must match a configured channel in Talon.One."),
+    attributes: z
+      .record(z.unknown())
+      .optional()
+      .describe("Custom CustomerSession attributes. Only include attributes returned by list_attributes for the CustomerSession entity."),
+    dry: z
+      .boolean()
+      .optional()
+      .describe("If true, evaluates the session without persisting any changes or effects. Useful for previewing campaign outcomes."),
+    now: z
+      .string()
+      .optional()
+      .describe("Override the current timestamp for campaign evaluation. ISO 8601 format, e.g. '2026-12-24T18:00:00Z'. Use this to test time-based campaigns at a specific date/time."),
+  },
+  async ({ sessionId, profileId, state, cartItems, couponCodes, referralCode, channel, attributes, dry, now }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+        }],
+      };
+    }
+
+    const sessionBody: Record<string, unknown> = { profileId, state };
+    if (cartItems?.length) sessionBody.cartItems = cartItems;
+    if (couponCodes?.length) sessionBody.couponCodes = couponCodes;
+    if (referralCode) sessionBody.referralCode = referralCode;
+    if (channel) sessionBody.channel = channel;
+    if (attributes && Object.keys(attributes).length > 0) sessionBody.attributes = attributes;
+
+    const body = { customerSession: sessionBody };
+
+    const params = new URLSearchParams();
+    if (dry) params.set("dry", "true");
+    if (now) params.set("now", now);
+    const qs = params.size > 0 ? `?${params.toString()}` : "";
+
+    const result = await integrationFetch(config, "PUT", `/v2/customer_sessions/${encodeURIComponent(sessionId)}${qs}`, body) as {
+      session?: {
+        id?: string;
+        profileId?: string;
+        state?: string;
+        cartItems?: unknown[];
+        total?: number;
+        attributes?: Record<string, unknown>;
+      };
+      customerProfile?: {
+        integrationId?: string;
+        attributes?: Record<string, unknown>;
+      };
+      effects?: Array<{
+        campaignId?: number;
+        rulesetId?: number;
+        ruleIndex?: number;
+        ruleName?: string;
+        effectType?: string;
+        props?: Record<string, unknown>;
+      }>;
+      ruleFailureReasons?: Array<{
+        campaignId?: number;
+        campaignName?: string;
+        rulesetId?: number;
+        totalResultSize?: number;
+        ruleIndex?: number;
+        ruleName?: string;
+        failureCode?: string;
+      }>;
+      triggeredCampaigns?: Array<{
+        id?: number;
+        name?: string;
+      }>;
+    };
+
+    // Format a structured summary for the skill to deconstruct
+    const lines: string[] = [];
+
+    const session = result.session;
+    if (session) {
+      lines.push(`=== Session ===`);
+      lines.push(`ID: ${sessionId}`);
+      lines.push(`Profile: ${session.profileId ?? profileId}`);
+      lines.push(`State: ${session.state ?? state}`);
+      if (session.total !== undefined) lines.push(`Cart Total: ${session.total}`);
+    }
+
+    const effects = result.effects ?? [];
+    lines.push(`\n=== Effects (${effects.length}) ===`);
+    if (effects.length === 0) {
+      lines.push("No effects applied.");
+    } else {
+      for (const e of effects) {
+        const props = e.props ? ` — ${JSON.stringify(e.props)}` : "";
+        lines.push(`[Campaign ${e.campaignId}] ${e.effectType}${props}${e.ruleName ? ` (rule: ${e.ruleName})` : ""}`);
+      }
+    }
+
+    const failures = result.ruleFailureReasons ?? [];
+    lines.push(`\n=== Rule Failure Reasons (${failures.length}) ===`);
+    if (failures.length === 0) {
+      lines.push("No rule failures recorded.");
+    } else {
+      for (const f of failures) {
+        lines.push(`[Campaign ${f.campaignId}${f.campaignName ? ` "${f.campaignName}"` : ""}] Rule ${f.ruleIndex ?? "?"}${f.ruleName ? ` "${f.ruleName}"` : ""}: ${f.failureCode ?? "unknown failure"}`);
+      }
+    }
+
+    const triggered = result.triggeredCampaigns ?? [];
+    if (triggered.length > 0) {
+      lines.push(`\n=== Campaigns That Fired (${triggered.length}) ===`);
+      for (const c of triggered) {
+        lines.push(`Campaign ${c.id}: ${c.name ?? "(unnamed)"}`);
+      }
+    }
+
+    lines.push(`\n=== Raw Response ===`);
+    lines.push(JSON.stringify(result, null, 2));
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: track_event
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "track_event",
+  "Submit a custom event against a customer session via the Talon.One Integration API. Use this to test event-triggered campaigns.",
+  {
+    sessionId: z
+      .string()
+      .describe("The session ID to associate this event with."),
+    type: z
+      .string()
+      .describe("The event type name (must match an event type configured in Talon.One)."),
+    attributes: z
+      .record(z.unknown())
+      .optional()
+      .describe("Custom event attributes. Only include attributes returned by list_attributes for the Event entity."),
+  },
+  async ({ sessionId, type, attributes }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+        }],
+      };
+    }
+
+    const body: Record<string, unknown> = { sessionId, type };
+    if (attributes && Object.keys(attributes).length > 0) body.attributes = attributes;
+
+    const result = await integrationFetch(config, "POST", `/v2/events`, body) as {
+      effects?: Array<{ campaignId?: number; effectType?: string; props?: Record<string, unknown> }>;
+      ruleFailureReasons?: Array<{ campaignId?: number; campaignName?: string; failureCode?: string }>;
+    };
+
+    const lines: string[] = [`Event "${type}" submitted for session ${sessionId}.`];
+
+    const effects = result.effects ?? [];
+    lines.push(`\n=== Effects (${effects.length}) ===`);
+    for (const e of effects) {
+      const props = e.props ? ` — ${JSON.stringify(e.props)}` : "";
+      lines.push(`[Campaign ${e.campaignId}] ${e.effectType}${props}`);
+    }
+
+    const failures = result.ruleFailureReasons ?? [];
+    lines.push(`\n=== Rule Failure Reasons (${failures.length}) ===`);
+    for (const f of failures) {
+      lines.push(`[Campaign ${f.campaignId}${f.campaignName ? ` "${f.campaignName}"` : ""}]: ${f.failureCode ?? "unknown"}`);
+    }
+
+    lines.push(`\n=== Raw Response ===`);
+    lines.push(JSON.stringify(result, null, 2));
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: get_customer_session
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "get_customer_session",
+  "Retrieve the current state of a customer session from the Talon.One Integration API.",
+  {
+    sessionId: z
+      .string()
+      .describe("The session ID to retrieve."),
+  },
+  async ({ sessionId }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+        }],
+      };
+    }
+
+    const result = await integrationFetch(config, "GET", `/v2/customer_sessions/${encodeURIComponent(sessionId)}`) as {
+      id?: string;
+      profileId?: string;
+      state?: string;
+      cartItems?: unknown[];
+      couponCodes?: string[];
+      channel?: string;
+      total?: number;
+      attributes?: Record<string, unknown>;
+      created?: string;
+      updated?: string;
+    };
+
+    const lines: string[] = [
+      `Session ID: ${result.id ?? sessionId}`,
+      `Profile: ${result.profileId ?? "(none)"}`,
+      `State: ${result.state ?? "unknown"}`,
+      `Channel: ${result.channel ?? "(none)"}`,
+      `Cart Total: ${result.total ?? 0}`,
+      `Cart Items: ${result.cartItems?.length ?? 0}`,
+      `Coupon Codes: ${result.couponCodes?.join(", ") || "(none)"}`,
+    ];
+
+    if (result.attributes && Object.keys(result.attributes).length > 0) {
+      lines.push(`Attributes: ${JSON.stringify(result.attributes)}`);
+    }
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   }
 );
 

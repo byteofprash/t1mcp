@@ -32,7 +32,7 @@ Read `~/.claude/channels/talonone/.env` if it exists.
 
 **Step 2: Collect credentials**
 
-Ask the user for both values (you can ask together since there are only two):
+Ask the user for all three values (you can ask for all three together):
 
 1. **`TALON_BASE_URL`** — Their Talon.One deployment URL.
    - Format: `https://<subdomain>.talon.one` (no trailing slash, HTTPS required)
@@ -42,9 +42,15 @@ Ask the user for both values (you can ask together since there are only two):
    - Generated in the Talon.One dashboard under **Account → Developer → Management API keys**
    - This key has broad write access — treat it like a password and never share it
 
+3. **`TALON_INTEGRATION_API_KEY`** — Their Integration API key (Application API key).
+   - Found in the Talon.One dashboard under **Applications → [Your Application] → Settings → Developer → API Keys**
+   - This is the key used by your integration (website/app) to call the Integration API
+   - Required for basket testing, session evaluation, and event submission
+   - If the user doesn't have this yet, they can skip it and add it later by re-running `/talonone:configure`
+
 **Step 3: Validate**
 
-Test the credentials with a quick API call:
+Test the Management API credentials with a quick API call:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}" \
@@ -57,6 +63,17 @@ curl -s -o /dev/null -w "%{http_code}" \
 - `000` or connection refused → bad base URL; ask the user to verify the URL
 - Other 4xx/5xx → warn but offer to save anyway
 
+If the user provided `TALON_INTEGRATION_API_KEY`, optionally validate it too:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: ApiKey-v1 <TALON_INTEGRATION_API_KEY>" \
+  "<TALON_BASE_URL>/v2/customer_sessions/test-validate-session"
+```
+
+- `200` or `404` → key is valid (404 just means the session doesn't exist yet)
+- `401` → bad Integration API key; ask the user to double-check it
+
 **Step 4: Write the config file**
 
 ```bash
@@ -67,9 +84,10 @@ Then write `~/.claude/channels/talonone/.env` using the Write tool:
 ```
 TALON_API_KEY=<key>
 TALON_BASE_URL=<url>
+TALON_INTEGRATION_API_KEY=<integration-key>
 ```
 
-Do not add quotes around values.
+If the user skipped the Integration API key, omit that line. Do not add quotes around values.
 
 **Step 5: Confirm**
 

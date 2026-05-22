@@ -1,10 +1,12 @@
 {
   "mcpServers": {
-    "talonone": {
-      "command": "npx",
-      "args": ["tsx", "src/index.ts"],
+    "talon-one": {
+      "command": "node",
+      "args": ["/Users/prashanth/code/talonone-mcp/dist/index.js"],
       "env": {
-        "TALON_ENV_FILE": ".env"
+        "TALON_BASE_URL": "https://yourcompany.europe-west1.talon.one",
+        "TALON_MANAGEMENT_API_KEY": "your-management-api-key",
+        "TALON_INTEGRATION_API_KEY": "your-integration-api-key"
       }
     }
   }

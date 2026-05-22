@@ -1,8 +1,15 @@
 {
-  "name": "@claude-plugins/talonone",
+  "name": "talon-one-mcp",
   "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "talon-one-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsc",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },
