@@ -1,9 +1,8 @@
 ---
-name: talonone
+name: talonone-write-cama
 description: This skill should be used when the user asks to "create a campaign", "build a promotion", "set up a campaign", "manage Talon.One", "use a campaign template", "create a discount campaign", or discusses Talon.One applications, deployments, campaigns, or campaign templates.
 version: 0.1.0
 ---
-
 # Talon.One Campaign Management
 
 ## Talon.One Hierarchy
@@ -52,8 +51,8 @@ Call `list_applications` to get the application ID if the user hasn't provided o
 ### Step 2 — List available templates
 Call `list_campaign_templates` with the `applicationId`. Present the options to the user. Only `"available"` state templates will be returned.
 
-### Step 3 — Fetch the template details
-Once the user picks a template, call `get_campaign_template` to read the full `template_params` list. This tells you exactly what placeholder values you need to collect.
+### Step 3 — Fetch the template details ⚠️ MANDATORY
+**Always call `get_campaign_template` before creating a campaign — even if you think you already know the params.** Never construct `templateParamValues` from a `list_campaign_templates` response alone; the placeholder names and types shown there are a summary only. The authoritative schema comes from `get_campaign_template`. Skipping this step will cause param mismatches and silent failures.
 
 ### Step 4 — Resolve placeholder values
 This is the most important step. Approach it like a smart form-filler:
@@ -74,6 +73,32 @@ Call `create_campaign_from_template` with:
 - `templateId`
 - `name` (the campaign name — ask if not provided)
 - `templateParamValues` — array of `{ name, expression }` bindings
+
+## Encoding `templateParamValues`
+
+Each entry in `templateParamValues` must match **exactly** the `name` from `template_params` returned by `get_campaign_template`. The `expression` field is a Talang expression array.
+
+### Type encoding reference
+
+| `type` | Expression format | Example (value = 10%) |
+|--------|------------------|-----------------------|
+| `string` | `["identity", "value"]` | `["identity", "shirts"]` |
+| `number` | `["identity", 42]` | `["identity", 5]` |
+| `boolean` | `["identity", true]` | `["identity", false]` |
+| `percent` | `["/", <integer>, 100]` | `["/", 10, 100]` |
+| `(list string)` | `["list", "a", "b", "c"]` | `["list", "S", "M", "L"]` |
+
+> **`percent` is not a plain number.** Always encode it as a division expression: `["/", <percent_integer>, 100]`. For example, 10% → `["/", 10, 100]`, 15% → `["/", 15, 100]`.
+
+### Example `templateParamValues` for a discount campaign
+
+```json
+[
+  { "name": "promotion_name",  "expression": ["identity", "SUMMER10"] },
+  { "name": "discount_percent", "expression": ["/", 10, 100] },
+  { "name": "category_name",   "expression": ["identity", "shirts"] }
+]
+```
 
 ## MCP Tools Reference
 
