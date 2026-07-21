@@ -927,6 +927,128 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: list_campaigns
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "list_campaigns",
+  "List all campaigns for a given Talon.One application.",
+  {
+    applicationId: z
+      .number()
+      .int()
+      .describe("The application (deployment) ID to list campaigns for."),
+    pageSize: z
+      .number()
+      .int()
+      .optional()
+      .describe("Maximum number of campaigns to return (default 50)."),
+  },
+  async ({ applicationId, pageSize = 50 }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+          },
+        ],
+      };
+    }
+
+    const result = (await talonFetch(
+      config,
+      "GET",
+      `/v1/applications/${applicationId}/campaigns?pageSize=${pageSize}`
+    )) as {
+      data: Array<{
+        id: number;
+        name: string;
+        state: string;
+        description?: string;
+        tags?: string[];
+        created?: string;
+        startTime?: string;
+        endTime?: string;
+      }>;
+      totalResultSize?: number;
+    };
+
+    const campaigns = result.data ?? [];
+
+    if (campaigns.length === 0) {
+      return {
+        content: [
+          { type: "text" as const, text: "No campaigns found for this application." },
+        ],
+      };
+    }
+
+    const lines = campaigns.map((c) => {
+      const parts = [
+        `ID: ${c.id} | Name: ${c.name} | State: ${c.state}`,
+      ];
+      if (c.description) parts.push(`  Description: ${c.description}`);
+      if (c.tags && c.tags.length > 0) parts.push(`  Tags: ${c.tags.join(", ")}`);
+      return parts.join("\n");
+    });
+
+    const header = `Campaigns for application ${applicationId} (${campaigns.length} found):`;
+    return {
+      content: [{ type: "text" as const, text: [header, ...lines].join("\n\n") }],
+    };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: delete_campaign
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "delete_campaign",
+  "Permanently delete a campaign from a Talon.One application. This action is irreversible.",
+  {
+    applicationId: z
+      .number()
+      .int()
+      .describe("The application (deployment) ID that owns the campaign."),
+    campaignId: z
+      .number()
+      .int()
+      .describe("The ID of the campaign to delete."),
+  },
+  async ({ applicationId, campaignId }) => {
+    const config = loadConfig();
+    if (!config) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Talon.One credentials not configured. Run /talonone:configure to set up your API key and base URL.",
+          },
+        ],
+      };
+    }
+
+    await talonFetch(
+      config,
+      "DELETE",
+      `/v1/applications/${applicationId}/campaigns/${campaignId}`
+    );
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Campaign ${campaignId} has been permanently deleted from application ${applicationId}.`,
+        },
+      ],
+    };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 
